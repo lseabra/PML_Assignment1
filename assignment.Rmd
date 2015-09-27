@@ -1,0 +1,180 @@
+---
+title: "Practical Machine Learning Assignment"
+author: "Luis Seabra Coelho"
+date: "September 27, 2015"
+output: html_document
+---
+
+# Assignment
+
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+## Data 
+
+The training data for this project are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment. 
+
+## What you should submit
+
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases. 
+
+1. Your submission should consist of a link to a Github repo with your R markdown and compiled HTML file describing your analysis. Please constrain the text of the writeup to < 2000 words and the number of figures to be less than 5. It will make it easier for the graders if you submit a repo with a gh-pages branch so the HTML page can be viewed online (and you always want to make it easy on graders :-).
+
+2. You should also apply your machine learning algorithm to the 20 test cases available in the test data above. Please submit your predictions in appropriate format to the programming assignment for automated grading. See the programming assignment for additional details. 
+
+## Reproducibility 
+
+Due to security concerns with the exchange of R code, your code will not be run during the evaluation by your classmates. Please be sure that if they download the repo, they will be able to view the compiled HTML version of your analysis.
+
+# Reproducibility
+
+## Initial setup
+
+The following libraries were used to generate the code used in this assignment:
+
+```{r setup, echo = TRUE, cache = FALSE, warning = FALSE, message = FALSE}
+library(knitr)
+library(RCurl)
+library(caret)
+library(rattle)
+library(rpart.plot)
+library(randomForest)
+set.seed(1111)
+opts_chunk$set(echo = TRUE, message = FALSE, error = TRUE, warning = TRUE, comment = NA, fig.align = "center", dpi = 100, cache = FALSE, tidy = FALSE, cache.path = ".cache/", fig.path = "fig/")
+```
+
+And as part of this initial setup, we set the seed to 1111 and some generaL options, as shown above.
+
+## Raw data
+
+The data was download from the links provided and loaded into the datasets train and test using the following code:
+
+```{r rawdata}
+setInternet2(use = TRUE)
+if (!file.exists("data/pml-training.csv")) {
+        download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", destfile="data/pml-training.csv")
+}
+if (!file.exists("data/pml-testing.csv")) {
+        download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", destfile="data/pml-testing.csv")
+}
+train <- read.csv("data/pml-training.csv", na.strings=c("NA","#DIV/0!",""))
+test  <- read.csv("data/pml-testing.csv", na.strings=c("NA","#DIV/0!",""))
+#head(train); head(test)
+dim(train); dim(test)
+```
+Both datasets have 160 columns and there are 19622 rows in the train dataset and 20 in the test dataset. The next step is to inpect the data and get a tidy, clean dataset.
+
+First we'll get rid of the columns that don't have any data values, ie, that have all values NA. And we'll make sure all rows have some value too. Also, the first column X is the number of the observation, ordered by classe - they're closely related by construction, so we better loose it. For last, we get want to keep only meaningful, added value attributes - apparently the attribute new_window doesn't add value.
+
+
+```{r tidydata}
+train <- train[,colSums(is.na(train)) == 0] # 100 columns with all values NA
+train <- train[rowSums(is.na(train)) == 0,] # no rows with all values NA
+train <- train[c(-1)]
+trainnzv <- nearZeroVar(train, saveMetrics=TRUE)
+train <- train[!trainnzv$nzv]
+dim(train)
+cleantrain <- colnames(train)
+cleantest <- colnames(train[, -58])
+test <- test[cleantest]
+dim(test)
+message("Near zero attributes removed:")
+trainnzv[trainnzv$nzv,]
+```
+
+The fact is that there were 103 columns that didn't bring any added any value at all. A more delicate matter had also to be taken care of: for some reason, R detected different data type in 3 columns:
+
+```{r tidydata2, message = TRUE}
+for (i in 1:length(test) ) {
+        if(class(test[,i]) != class(train[,i])) {
+                message(sprintf("Column %i '%s' is a %s on the test dataframe but it is a %s in the train dataframe.", i, colnames(test[i]), class(test[,i]), class(train[,i])))
+        }
+}
+## The best way to force the same column object types is the following:
+test <- rbind(train[2, -58] , test)
+test <- test[-1,]
+```
+
+## Methodology
+
+In an ideal world, or at least with enough time and computing power, we should use the train  funcion in the Caret R library and run all available methods and compare them. The fact is that just the random forest method took over 3 hours to run on a regular laptop using the data provided and so this is something that wasn't feasible.
+
+A more practical approach was used, using just 2 models, a tree and a random forest. These models were chosen because they provide different benefits: tree models are easy to interpret and validate and, on the other hand, random forests are very accurate.
+
+As we're using cross validation, we can check if that's in fact still valid in this particular case with this particular data.
+
+## Cross validation partition
+
+Let's split the train dataset on the classe attribute putting 75% of the data in the trainsub dataset and the remaining 25% on the traintest dataset (4904 observations).
+
+```{r crossvalidation}
+filter <- createDataPartition(y=train$classe, p=0.75, list=FALSE)
+trainsub <- train[filter, ] 
+traintest <- train[-filter, ]
+dim(trainsub); dim(traintest)
+```
+
+## Checking classes
+
+Classes range from `r sum(trainsub$classe == "A")` observation in classe A and `r sum(trainsub$classe == "D")` in classe D, suggesting that data doesn't vary that much regarding classe.
+
+```{r histogram}
+plot(trainsub$classe,
+     main="No. of observations in each class",
+     xlab="Classes",
+     ylab="No. of observations")
+```
+
+# Prediction models
+
+For the reasons explained earlier, a tree model and a random forest were selected to predict the results using the cross validation on the training set and allows us to confirm their behavior in accuracy with this particular data. This will allows us to select the best model and apply it to our test set to make the prediction.
+
+## Tree
+
+
+```{r tree}
+treemodel <- rpart(classe ~ ., data=trainsub, method="class")
+prediction <- predict(treemodel, traintest, type = "class")
+## use rpart.plot if for somereason you can't have the libraries to run facyRpartPlot
+## rpart.plot(treemodel, main="Classification Tree", extra=102, under=TRUE, faclen=0)
+fancyRpartPlot(treemodel)
+confusionMatrix(prediction, traintest$classe)
+```
+
+The tree model works pretty well with this data: 4 missed predictions out of 979. In particular, inspecting the output of the confusionMatrix function, we can see:
+
+ - Accuracy: 87.85% (ie, out-of-sample error 12.15%)
+ - 95% CI: (86.9%, 88.75%)
+ - Kappa: 84.63%
+ 
+## Random forest
+
+```{r randomforest}
+rfmodel <- randomForest(classe ~ . , data=trainsub)
+rfprediction <- predict(rfmodel, traintest, type="class")
+confusionMatrix(rfprediction, traintest$classe)
+```
+
+Impressive output with no missed preduction:
+
+ - Accuracy: 99.98% (ie, out-of-sample error 0.02%)
+ - 95% CI: (99.89%, 100%)
+ - Kappa: 99.97%
+
+## Output
+
+```{r output, message = TRUE}
+finalprediction <- predict(rfmodel, test, type="class")
+message(finalprediction)
+for(i in 1:length(finalprediction)) {
+        filename = paste0("output/problem_id_",i,".txt")
+        if(!file.exists(filename)) {
+                write.table(finalprediction[i], file=filename, quot=FALSE, row.names=FALSE, col.names=FALSE)
+        }
+}
+```
